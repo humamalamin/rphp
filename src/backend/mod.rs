@@ -14,7 +14,11 @@ use hyper::{
 use tokio::time::{Instant, timeout_at};
 use tracing::{debug, warn};
 
-use crate::{body::ResponseBody, server::plain};
+use crate::{
+    body::ResponseBody,
+    metrics::{Failure, Metrics},
+    server::plain,
+};
 use cgi::{ConnInfo, Script};
 use classic::{ClassicPool, ExecError};
 
@@ -29,29 +33,40 @@ pub struct Php {
 
 impl Php {
     /// Read the body (bounded), run the entry point, map failures to HTTP.
-    pub async fn handle(&self, req: Request<Incoming>, conn: ConnInfo) -> Response<ResponseBody> {
+    /// Failures are counted in `metrics` by source (client, server, PHP).
+    pub async fn handle(
+        &self,
+        req: Request<Incoming>,
+        conn: ConnInfo,
+        metrics: &Metrics,
+    ) -> Response<ResponseBody> {
         let deadline = Instant::now() + self.request_timeout;
         // Refuse early, before spending time reading a body nobody can serve.
         if self.pool.is_saturated() {
             warn!(method = %req.method(), path = req.uri().path(), "PHP workers saturated; refusing request");
+            metrics.failure(Failure::Overloaded);
             return overloaded();
         }
         let (parts, body) = req.into_parts();
 
         if declared_length(&parts.headers).is_some_and(|len| len > self.max_body_bytes) {
+            metrics.failure(Failure::BodyTooLarge);
             return too_large();
         }
         let limit = usize::try_from(self.max_body_bytes).unwrap_or(usize::MAX);
         let body = match timeout_at(deadline, Limited::new(body, limit).collect()).await {
             Ok(Ok(collected)) => collected.to_bytes(),
             Ok(Err(err)) if err.downcast_ref::<LengthLimitError>().is_some() => {
+                metrics.failure(Failure::BodyTooLarge);
                 return too_large();
             }
             Ok(Err(err)) => {
                 debug!(error = %err, "failed to read request body");
+                metrics.failure(Failure::MalformedBody);
                 return plain(StatusCode::BAD_REQUEST, "malformed request body\n");
             }
             Err(_) => {
+                metrics.failure(Failure::BodyTimeout);
                 return plain(
                     StatusCode::REQUEST_TIMEOUT,
                     "request body was not received in time\n",
@@ -64,6 +79,12 @@ impl Php {
             Ok(res) => res,
             Err(err) => {
                 warn!(method = %parts.method, path = parts.uri.path(), error = %err, "PHP request failed");
+                metrics.failure(match err {
+                    ExecError::Timeout => Failure::PhpTimeout,
+                    ExecError::Overloaded => Failure::Overloaded,
+                    ExecError::Unavailable => Failure::ShuttingDown,
+                    ExecError::Upstream(_) => Failure::PhpFailed,
+                });
                 match err {
                     ExecError::Timeout => {
                         plain(StatusCode::GATEWAY_TIMEOUT, "PHP did not respond in time\n")

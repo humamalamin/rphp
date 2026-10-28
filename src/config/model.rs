@@ -20,6 +20,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub php: PhpConfig,
     pub worker: WorkerConfig,
+    pub admin: AdminConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -79,6 +80,27 @@ pub struct WorkerConfig {
     pub max_queue_size: usize,
 }
 
+/// Separate listener for `/health` and `/metrics`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AdminConfig {
+    /// When true, `/health` and `/metrics` are served only on the admin
+    /// listener and the application receives those paths.
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "127.0.0.1".into(),
+            port: 9180,
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -117,6 +139,8 @@ impl Default for WorkerConfig {
 #[derive(Debug, Clone)]
 pub struct ValidatedConfig {
     pub listen: SocketAddr,
+    /// Admin listener address, when `admin.enabled`.
+    pub admin_listen: Option<SocketAddr>,
     pub document_root: PathBuf,
     pub entry_point: PathBuf,
     /// Directory relative paths (including `php.binary`) are resolved against.
@@ -187,6 +211,28 @@ impl Config {
             errors.push("server.header_read_timeout_ms must be greater than 0".into());
         }
 
+        let a = &self.admin;
+        let admin_ip = if a.enabled {
+            let ip = a.host.parse::<IpAddr>().ok();
+            if ip.is_none() {
+                errors.push(format!(
+                    "admin.host {:?} is not an IP address (use e.g. \"127.0.0.1\")",
+                    a.host
+                ));
+            }
+            if a.port == 0 {
+                errors.push("admin.port must be between 1 and 65535".into());
+            } else if a.port == s.port {
+                errors.push(format!(
+                    "admin.port {} is also server.port; the admin listener needs its own port",
+                    a.port
+                ));
+            }
+            ip
+        } else {
+            None
+        };
+
         let document_root = check_document_root(&s.document_root, base_dir, &mut errors);
         let entry_point = document_root
             .as_deref()
@@ -222,6 +268,7 @@ impl Config {
         match (errors.is_empty(), ip, document_root, entry_point) {
             (true, Some(ip), Some(document_root), Some(entry_point)) => Ok(ValidatedConfig {
                 listen: SocketAddr::new(ip, s.port),
+                admin_listen: admin_ip.map(|ip| SocketAddr::new(ip, a.port)),
                 document_root,
                 entry_point,
                 base_dir: base_dir.to_path_buf(),
@@ -414,6 +461,31 @@ mod tests {
         let mut cfg = Config::default();
         cfg.server.document_root = "does-not-exist".into();
         assert!(problems(&cfg, &app.0)[0].contains("document_root"));
+    }
+
+    #[test]
+    fn admin_listener_is_off_by_default_and_validated_when_on() {
+        let app = TempApp::new("admin");
+        assert_eq!(
+            Config::default().validate(&app.0).unwrap().admin_listen,
+            None
+        );
+
+        let mut cfg = Config::default();
+        cfg.admin.enabled = true;
+        let v = cfg.validate(&app.0).unwrap();
+        assert_eq!(v.admin_listen, Some("127.0.0.1:9180".parse().unwrap()));
+
+        cfg.admin.host = "localhost".into();
+        cfg.admin.port = cfg.server.port;
+        let errs = problems(&cfg, &app.0);
+        assert_eq!(errs.len(), 2, "{errs:#?}");
+        assert!(errs[0].contains("admin.host"));
+        assert!(errs[1].contains("needs its own port"));
+
+        // A disabled admin section is not validated.
+        cfg.admin.enabled = false;
+        assert!(cfg.validate(&app.0).is_ok());
     }
 
     #[test]

@@ -148,7 +148,7 @@ Implementation notes:
   `RLIMIT_AS`/`RLIMIT_DATA`: allocation failures reach the PHP2Shell
   (CVE-2026-109618) code path.
 
-## Phase 4 — Observability (1 week)
+## Phase 4 — Observability (implemented; exit gate pending CI)
 
 - Structured JSON logs (`RPHP_LOG_FORMAT=json`), request ID propagated to PHP
   as `HTTP_X_REQUEST_ID`.
@@ -156,6 +156,38 @@ Implementation notes:
   workers, queue depth, restarts, errors by class (HTTP vs PHP).
 - `/health` reports degraded when no worker is available. Health and metrics
   move to a separate admin listener before any non-loopback deployment.
+
+Exit gate: request ID visible in PHP and in the response; metrics reflect
+worker states, recycling, failures and request outcomes against real
+`php-cgi`; `/health` is 503 without workers.
+
+Implementation notes:
+
+- `RPHP_LOG_FORMAT=text|json` (default text; anything else is a startup
+  error). JSON is one object per line, event fields flattened, plus the
+  current span, which carries `request_id`. PHP stderr from a FastCGI
+  request is logged inside that span.
+- Access log: one event per request, target `rphp::access`, with method,
+  path (never the query string: it often carries tokens), status,
+  `duration_ms` and handler. `/health` and `/metrics` log at debug.
+- Request ID: a client-supplied `X-Request-Id` is kept if it is a single
+  value of at most 128 characters from `[A-Za-z0-9._:/+=-]`; otherwise a new
+  one is generated (random per-process prefix plus a counter, no new
+  dependency). It replaces the request header, so PHP sees the same value,
+  and is returned on every response.
+- Metrics are rendered by hand from atomics (no `prometheus` crate). Labels
+  are bounded: `handler` (`builtin`, `static`, `php`), status class, failure
+  `source` (`http`, `server`, `php`) and `kind`. Latency runs until the
+  response head is ready, not until a streamed body ends.
+- Health: 200 while at least one worker is idle or busy (all busy is not
+  unhealthy; requests queue), 503 when every worker is being respawned or
+  the pool is shutting down.
+- `[admin] enabled = true` serves `/health` and `/metrics` on their own
+  listener (default `127.0.0.1:9180`) and hands those paths on the main
+  listener to the application, closing the phase 2 gap. Without it, a
+  non-loopback `server.host` produces a startup warning.
+- Not done: per-worker metrics (by worker ID), OpenTelemetry/trace context
+  (`traceparent`) propagation, log sampling.
 
 ## Phase 5 — Persistent worker prototype, PSR-7 (3 weeks)
 

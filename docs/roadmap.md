@@ -36,9 +36,9 @@ tasks and exit gates for each phase are in
 - [x] Failure-injection tests, no orphaned processes
 
 ## Phase 4 — Observability (week 7)
-- [ ] JSON logs and request IDs
-- [ ] Prometheus metrics
-- [ ] Health reflects worker availability; admin listener
+- [x] JSON logs and request IDs
+- [x] Prometheus metrics
+- [x] Health reflects worker availability; admin listener
 
 ## Phase 5 — Persistent worker prototype (weeks 8–10)
 - [ ] Framed worker protocol (see `worker-protocol.md`)

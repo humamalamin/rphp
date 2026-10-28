@@ -100,5 +100,5 @@ Single crate until boundaries are stable.
 | `backend` (CGI mapping, classic pool) | implemented |
 | `static_files` | implemented |
 | supervisor (queue, crash replacement, shutdown) | implemented, in `backend::classic` |
-| `observability` | phase 4 |
+| observability (`logging`, `metrics`, `request_id`; admin listener in `server`) | implemented |
 | `protocol` (persistent worker) | phase 5 |

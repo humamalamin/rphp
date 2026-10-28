@@ -2,7 +2,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use rphp::server::{self, App, ServerOptions};
+use rphp::server::{self, Admin, App, ServerOptions};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -12,6 +12,7 @@ use tokio::{
 
 struct TestServer {
     addr: std::net::SocketAddr,
+    app: Arc<App>,
     stop: Option<oneshot::Sender<()>>,
     handle: JoinHandle<std::io::Result<()>>,
     root: PathBuf,
@@ -38,19 +39,24 @@ fn document_root() -> PathBuf {
 }
 
 async fn start(options: ServerOptions) -> TestServer {
+    start_app(options, true).await
+}
+
+async fn start_app(options: ServerOptions, builtin_endpoints: bool) -> TestServer {
     let root = document_root();
     let app = Arc::new(App {
-        document_root: root.clone(),
-        php: None,
+        builtin_endpoints,
+        ..App::new(root.clone(), None)
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    let handle = tokio::spawn(server::run(listener, app, options, async {
+    let handle = tokio::spawn(server::run(listener, Arc::clone(&app), options, async {
         let _ = stopped.await;
     }));
     TestServer {
         addr,
+        app,
         stop: Some(stop),
         handle,
         root,
@@ -78,8 +84,19 @@ impl TestServer {
 
 /// Send one request with `Connection: close` and return the raw response.
 async fn request(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+    request_with(addr, method, path, "").await
+}
+
+/// Like [`request`], with extra header lines (each ending in `\r\n`).
+async fn request_with(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &str,
+) -> String {
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n");
+    let req =
+        format!("{method} {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n{headers}\r\n");
     stream.write_all(req.as_bytes()).await.unwrap();
     let mut buf = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut buf))
@@ -235,4 +252,127 @@ async fn header_read_timeout_drops_slow_clients() {
     );
 
     srv.shutdown().await;
+}
+
+fn header<'a>(res: &'a str, name: &str) -> Option<&'a str> {
+    let head = res.split("\r\n\r\n").next()?;
+    head.split("\r\n").skip(1).find_map(|line| {
+        let (n, v) = line.split_once(':')?;
+        n.eq_ignore_ascii_case(name).then(|| v.trim())
+    })
+}
+
+#[tokio::test]
+async fn metrics_endpoint_counts_requests() {
+    let srv = start(ServerOptions::default()).await;
+
+    request(srv.addr, "GET", "/css/app.css").await;
+    request(srv.addr, "GET", "/missing").await;
+
+    let res = request(srv.addr, "GET", "/metrics").await;
+    assert!(res.starts_with("HTTP/1.1 200 OK\r\n"), "{res}");
+    assert_eq!(
+        header(&res, "content-type"),
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
+    for expected in [
+        r#"rphp_http_requests_total{handler="static",status="2xx"} 1"#,
+        // Without PHP the fallback is 501.
+        r#"rphp_http_requests_total{handler="php",status="5xx"} 1"#,
+        // The scrape itself is still in flight.
+        "rphp_http_requests_in_flight 1",
+    ] {
+        assert!(res.contains(&format!("{expected}\n")), "{expected}\n{res}");
+    }
+    // No PHP pool, no worker series.
+    assert!(!res.contains("rphp_php_workers"), "{res}");
+
+    let res = request(srv.addr, "POST", "/metrics").await;
+    assert!(res.starts_with("HTTP/1.1 405 "), "{res}");
+
+    srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn every_response_carries_a_request_id() {
+    let srv = start(ServerOptions::default()).await;
+
+    let a = request(srv.addr, "GET", "/health").await;
+    let b = request(srv.addr, "GET", "/css/app.css").await;
+    let (a, b) = (
+        header(&a, "x-request-id").unwrap(),
+        header(&b, "x-request-id").unwrap(),
+    );
+    assert_ne!(a, b);
+    assert_eq!(a.len(), 33, "{a}");
+
+    // A well-formed ID from the client (or a proxy in front) is kept...
+    let res = request_with(srv.addr, "GET", "/health", "X-Request-Id: trace-42\r\n").await;
+    assert_eq!(header(&res, "x-request-id"), Some("trace-42"));
+
+    // ...anything that could garble a log line is replaced.
+    let res = request_with(
+        srv.addr,
+        "GET",
+        "/health",
+        "X-Request-Id: evil\" level=error msg=\"forged\r\n",
+    )
+    .await;
+    let id = header(&res, "x-request-id").unwrap();
+    assert!(!id.contains("evil"), "{id}");
+
+    srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn builtin_endpoints_can_be_handed_to_the_application() {
+    let srv = start_app(ServerOptions::default(), false).await;
+    // With an admin listener, /health and /metrics belong to the app (here:
+    // no PHP backend, so 501).
+    for path in ["/health", "/metrics"] {
+        let res = request(srv.addr, "GET", path).await;
+        assert!(res.starts_with("HTTP/1.1 501 "), "{path}: {res}");
+    }
+    srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_listener_serves_health_and_metrics_only() {
+    let app_srv = start(ServerOptions::default()).await;
+    request(app_srv.addr, "GET", "/css/app.css").await;
+
+    let admin = Arc::new(Admin {
+        metrics: Arc::clone(&app_srv.app.metrics),
+        pool: None,
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, stopped) = oneshot::channel::<()>();
+    let handle = tokio::spawn(server::run(
+        listener,
+        admin,
+        ServerOptions::default(),
+        async {
+            let _ = stopped.await;
+        },
+    ));
+
+    let res = request(addr, "GET", "/health").await;
+    assert!(res.starts_with("HTTP/1.1 200 OK\r\n"), "{res}");
+    // Shares the application's metrics; admin requests are not counted.
+    let res = request(addr, "GET", "/metrics").await;
+    assert!(
+        res.contains("rphp_http_requests_total{handler=\"static\",status=\"2xx\"} 1\n"),
+        "{res}"
+    );
+    assert!(
+        res.contains("rphp_http_requests_total{handler=\"builtin\",status=\"2xx\"} 0\n"),
+        "{res}"
+    );
+    let res = request(addr, "GET", "/css/app.css").await;
+    assert!(res.starts_with("HTTP/1.1 404 "), "{res}");
+
+    stop.send(()).unwrap();
+    handle.await.unwrap().unwrap();
+    app_srv.shutdown().await;
 }

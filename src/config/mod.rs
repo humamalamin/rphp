@@ -3,8 +3,8 @@
 mod model;
 
 pub use model::{
-    Config, MAX_WORKER_COUNT, PhpConfig, ServerConfig, ValidatedConfig, ValidationErrors,
-    WorkerConfig, WorkerMode,
+    AdminConfig, Config, MAX_WORKER_COUNT, PhpConfig, ServerConfig, ValidatedConfig,
+    ValidationErrors, WorkerConfig, WorkerMode,
 };
 
 use std::{

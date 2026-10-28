@@ -1,8 +1,9 @@
 //! RPHP: a Rust-powered PHP application server.
 //!
-//! Current scope (roadmap phase 2): configuration, PHP discovery and version
-//! enforcement, the HTTP server, static files, and classic-mode execution
-//! over FastCGI to a pool of `php-cgi` processes.
+//! Current scope (roadmap phase 4): configuration, PHP discovery and version
+//! enforcement, the HTTP server, static files, classic-mode execution over
+//! FastCGI to a supervised pool of `php-cgi` processes, structured logs,
+//! request IDs, Prometheus metrics and an optional admin listener.
 
 #[cfg(not(unix))]
 compile_error!("RPHP currently supports Unix-like systems only (Linux first; see SPEC.md).");
@@ -12,7 +13,10 @@ pub mod body;
 pub mod cli;
 pub mod config;
 pub mod fastcgi;
+pub mod logging;
+pub mod metrics;
 pub mod php;
+pub mod request_id;
 pub mod server;
 pub mod static_files;
 
@@ -58,6 +62,18 @@ pub fn warnings(pre: &Preflight) -> Vec<String> {
         warnings.push(format!(
             "listening on {} which is not a loopback address; the server is reachable from the network",
             pre.config.listen
+        ));
+        if pre.config.admin_listen.is_none() {
+            warnings.push(format!(
+                "/health and /metrics are served on {} as well; set `[admin] enabled = true` \
+                 to move them to a separate (loopback) listener",
+                pre.config.listen
+            ));
+        }
+    }
+    if let Some(admin) = pre.config.admin_listen.filter(|a| !a.ip().is_loopback()) {
+        warnings.push(format!(
+            "admin listener {admin} is not a loopback address; metrics are reachable from the network"
         ));
     }
     warnings

@@ -7,9 +7,11 @@ use rphp::{
         classic::{ClassicPool, PoolConfig},
     },
     cli::{self, Command},
-    server::{self, App, ServerOptions},
+    logging::{self, LogFormat},
+    metrics::Metrics,
+    server::{self, Admin, App, ServerOptions},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::watch};
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -33,7 +35,13 @@ async fn main() -> ExitCode {
         }
         Command::Check { config } => check(config.as_deref()).await,
         Command::Serve { config } => {
-            init_tracing();
+            match LogFormat::from_env() {
+                Ok(format) => logging::init(format),
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::from(2);
+                }
+            }
             match serve(config.as_deref()).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
@@ -43,15 +51,6 @@ async fn main() -> ExitCode {
             }
         }
     }
-}
-
-fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
 }
 
 async fn check(config: Option<&Path>) -> ExitCode {
@@ -68,6 +67,10 @@ async fn check(config: Option<&Path>) -> ExitCode {
                 pre.php.version.version_id()
             );
             println!("worker mode:   {}", pre.config.raw.worker.mode);
+            match pre.config.admin_listen {
+                Some(addr) => println!("admin listen:  {addr} (/health, /metrics)"),
+                None => println!("admin listen:  disabled (/health, /metrics on main listener)"),
+            }
             for warning in rphp::warnings(&pre) {
                 println!("warning:       {warning}");
             }
@@ -104,8 +107,11 @@ async fn serve(config: Option<&Path>) -> Result<(), Box<dyn std::error::Error + 
         working_dir: pre.config.document_root.clone(),
     })
     .await?;
+    let metrics = Arc::new(Metrics::new());
     let app = Arc::new(App {
         document_root: pre.config.document_root.clone(),
+        metrics: Arc::clone(&metrics),
+        builtin_endpoints: pre.config.admin_listen.is_none(),
         php: Some(Php {
             pool: pool.clone(),
             script: Script::new(
@@ -120,16 +126,54 @@ async fn serve(config: Option<&Path>) -> Result<(), Box<dyn std::error::Error + 
     let listener = TcpListener::bind(pre.config.listen)
         .await
         .map_err(|err| format!("cannot listen on {}: {err}", pre.config.listen))?;
+    let admin_listener = match pre.config.admin_listen {
+        Some(addr) => Some(
+            TcpListener::bind(addr)
+                .await
+                .map_err(|err| format!("cannot listen on {addr} (admin): {err}"))?,
+        ),
+        None => None,
+    };
     info!(addr = %listener.local_addr()?, "RPHP HTTP server started");
 
     let options = ServerOptions {
         shutdown_timeout: pre.config.shutdown_timeout(),
         header_read_timeout: pre.config.header_read_timeout(),
     };
-    let result = server::run(listener, app, options, shutdown_signal()).await;
+    // One signal stops both listeners.
+    let (stop_tx, stop_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = stop_tx.send(true);
+    });
+    let stopped = |mut rx: watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|&stop| stop).await;
+    };
+
+    let admin_task = admin_listener.map(|listener| {
+        if let Ok(addr) = listener.local_addr() {
+            info!(%addr, "admin listener started (/health, /metrics)");
+        }
+        let admin = Arc::new(Admin {
+            metrics,
+            pool: Some(pool.clone()),
+        });
+        tokio::spawn(server::run(
+            listener,
+            admin,
+            options.clone(),
+            stopped(stop_rx.clone()),
+        ))
+    });
+    let result = server::run(listener, app, options, stopped(stop_rx)).await;
     // HTTP is drained (or timed out) first, then PHP processes get SIGTERM
     // and the same grace period before SIGKILL.
     pool.shutdown(pre.config.shutdown_timeout()).await;
+    if let Some(task) = admin_task {
+        if let Ok(Err(err)) = task.await {
+            warn!(error = %err, "admin listener stopped with an error");
+        }
+    }
     result?;
     info!("RPHP stopped");
     Ok(())

@@ -6,7 +6,7 @@ supported interpreter version.
 
 ## Status
 
-Phase 3 of the [roadmap](docs/roadmap.md). Implemented:
+Phase 4 of the [roadmap](docs/roadmap.md). Implemented:
 
 - `rphp.toml` configuration with validation (unknown keys rejected, all
   problems reported at once, paths checked before startup)
@@ -19,9 +19,11 @@ Phase 3 of the [roadmap](docs/roadmap.md). Implemented:
 - Worker supervision: bounded wait queue (503 + `Retry-After`), crashed
   workers replaced, ordered shutdown (SIGTERM, then SIGKILL), no orphaned
   `php-cgi` processes
+- Observability: text or JSON logs with an access log, request IDs
+  (`X-Request-Id`, also visible to PHP), Prometheus `/metrics`, a `/health`
+  that reflects worker availability, and an optional admin listener
 
-**Not implemented yet:** metrics and structured logs,
-persistent mode, framework compatibility testing and production hardening.
+**Not implemented yet:** persistent mode, framework compatibility testing and production hardening.
 
 ## Requirements
 
@@ -48,15 +50,27 @@ than 8.4. By default it listens on `127.0.0.1:8080` and serves the
 curl -i http://127.0.0.1:8080/health
 ```
 
-`/health` reports that the Rust server is up. It does not yet check PHP
-workers. Any other path is served from `public/` if it is a static file, and
+`/health` answers `200 ok` while at least one PHP worker is running (idle or
+busy) and `503` when none is (all being respawned, or shutting down).
+`/metrics` serves Prometheus metrics: requests by handler and status class,
+latency histogram, in-flight requests, failures by source (`http`, `server`,
+`php`), worker states, queue depth, restarts and spawn failures. With
+`[admin] enabled = true`, both move to a separate listener (default
+`127.0.0.1:9180`) and the application receives those paths instead; do this
+before binding the main listener to a public address. Any other path is served from `public/` if it is a static file, and
 by `public/index.php` otherwise.
 
 ## Configuration
 
 Copy [`rphp.example.toml`](rphp.example.toml) to `rphp.toml` and adjust, or
-pass a path with `--config`. Every key is optional. Set `RUST_LOG` to change
-log verbosity (default `info`).
+pass a path with `--config`. Every key is optional.
+
+Logging: `RUST_LOG` sets verbosity (default `info`), `RPHP_LOG_FORMAT=json`
+switches to one JSON object per line. Every request gets an ID: the
+client's `X-Request-Id` if it is short and plain, a generated one otherwise.
+It is returned in the response, passed to PHP as
+`$_SERVER['HTTP_X_REQUEST_ID']`, and attached to every log line of that
+request, including PHP's stderr. Query strings and bodies are never logged.
 
 ## Development
 

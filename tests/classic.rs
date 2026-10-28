@@ -79,15 +79,15 @@ async fn start(options: Options) -> Option<Harness> {
     .await
     .expect("php-cgi workers start");
 
-    let app = Arc::new(App {
-        document_root: root.clone(),
-        php: Some(Php {
+    let app = Arc::new(App::new(
+        root.clone(),
+        Some(Php {
             pool: pool.clone(),
             script: Script::new(root.clone(), root.join("index.php")),
             max_body_bytes: options.max_body_bytes,
             request_timeout: options.request_timeout,
         }),
-    });
+    ));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -810,5 +810,127 @@ async fn stuck_worker_is_killed_after_the_grace_period() {
     // The aborted request ends with an error status, not a hang.
     let res = stuck.await.unwrap();
     assert!(res.status >= 500, "{}", res.status);
+    h.shutdown().await;
+}
+
+// --- Phase 4: observability ---
+
+/// Value of an unlabelled or fully labelled sample in a /metrics response.
+fn metric(text: &str, series: &str) -> u64 {
+    let prefix = format!("{series} ");
+    text.lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("no sample {series} in\n{text}"))
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn request_id_reaches_php_and_the_response() {
+    let Some(h) = start(Options::default()).await else {
+        return;
+    };
+    let res = h
+        .request("GET", "/echo", &[("X-Request-Id", "upstream-7")], b"")
+        .await;
+    assert_eq!(res.header("x-request-id"), Some("upstream-7"));
+    assert_eq!(res.json()["headers"]["HTTP_X_REQUEST_ID"], "upstream-7");
+
+    let res = h.get("/echo").await;
+    let id = res
+        .header("x-request-id")
+        .expect("generated ID")
+        .to_string();
+    assert_eq!(res.json()["headers"]["HTTP_X_REQUEST_ID"], id.as_str());
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn metrics_track_workers_restarts_and_failures() {
+    let Some(h) = start(Options {
+        count: 1,
+        max_requests: 2,
+        // Long enough for /slow (1s), short enough for /loop to time out.
+        request_timeout: Duration::from_millis(1500),
+        ..Options::default()
+    })
+    .await
+    else {
+        return;
+    };
+
+    let text = h.get("/metrics").await.text();
+    assert_eq!(metric(&text, "rphp_php_workers_configured"), 1);
+    assert_eq!(metric(&text, r#"rphp_php_workers{state="idle"}"#), 1);
+
+    // A running request shows up as a busy worker.
+    let addr = h.addr;
+    let slow = tokio::spawn(async move { get_at(addr, "/slow").await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let text = h.get("/metrics").await.text();
+    assert_eq!(metric(&text, r#"rphp_php_workers{state="busy"}"#), 1);
+    assert_eq!(slow.await.unwrap().status, 200);
+
+    // Second request on this worker: it reaches max_requests and is recycled.
+    assert_eq!(h.get("/pid").await.status, 200);
+    // A timeout replaces the (new) worker and is counted as a PHP failure.
+    assert_eq!(h.get("/loop").await.status, 504);
+    assert_eq!(h.get("/pid").await.status, 200);
+
+    let text = h.get("/metrics").await.text();
+    assert_eq!(
+        metric(
+            &text,
+            r#"rphp_php_worker_restarts_total{reason="recycled"}"#
+        ),
+        1
+    );
+    assert_eq!(
+        metric(&text, r#"rphp_php_worker_restarts_total{reason="failed"}"#),
+        1
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rphp_request_failures_total{source="php",kind="timeout"}"#
+        ),
+        1
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rphp_http_requests_total{handler="php",status="2xx"}"#
+        ),
+        3
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rphp_http_requests_total{handler="php",status="5xx"}"#
+        ),
+        1
+    );
+    assert_eq!(
+        metric(
+            &text,
+            r#"rphp_http_request_duration_seconds_count{handler="php"}"#
+        ),
+        4
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn health_reports_unavailable_without_workers() {
+    let Some(h) = start(Options::default()).await else {
+        return;
+    };
+    let res = h.get("/health").await;
+    assert_eq!(res.status, 200);
+    assert_eq!(res.text(), "ok\n");
+
+    h.pool.shutdown(Duration::from_secs(5)).await;
+    let res = h.get("/health").await;
+    assert_eq!(res.status, 503, "{}", res.text());
     h.shutdown().await;
 }

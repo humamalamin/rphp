@@ -18,7 +18,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -32,7 +32,7 @@ use tokio::{
     sync::{Semaphore, TryAcquireError, oneshot},
     time::{Instant, sleep, timeout, timeout_at},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument, Span, debug, error, info, warn};
 
 use super::cgi::{self, Head};
 use crate::{
@@ -76,6 +76,40 @@ pub struct PoolConfig {
     pub max_queue_size: usize,
     /// Working directory for php-cgi.
     pub working_dir: PathBuf,
+}
+
+/// A point-in-time view of the pool, for metrics and health checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStats {
+    /// `worker.count`.
+    pub configured: usize,
+    /// Workers ready to take a request.
+    pub idle: usize,
+    /// Workers running a request.
+    pub busy: usize,
+    /// Requests waiting for a worker.
+    pub waiting: usize,
+    /// Workers replaced after reaching `max_requests`.
+    pub recycled: u64,
+    /// Workers replaced after an error, timeout or crash.
+    pub failed: u64,
+    /// Failed attempts to start a replacement worker.
+    pub spawn_failures: u64,
+    /// The pool is shutting down.
+    pub closed: bool,
+}
+
+impl PoolStats {
+    /// Workers being stopped or (re)started, so neither idle nor busy.
+    pub fn starting(&self) -> usize {
+        self.configured.saturating_sub(self.idle + self.busy)
+    }
+
+    /// False when no worker can take a request now or after the queue: none
+    /// is running (all are being respawned) or the pool is shutting down.
+    pub fn is_available(&self) -> bool {
+        !self.closed && self.idle + self.busy > 0
+    }
 }
 
 /// Why a request could not be answered by PHP.
@@ -130,6 +164,14 @@ struct Inner {
     available: Semaphore,
     /// Requests currently waiting for a worker.
     waiting: AtomicUsize,
+    /// Workers checked out by a request.
+    busy: AtomicUsize,
+    /// Workers replaced after reaching `max_requests`.
+    recycled: AtomicU64,
+    /// Workers replaced after an error, timeout or crash.
+    failed: AtomicU64,
+    /// Respawn attempts that failed (each is retried with backoff).
+    spawn_failures: AtomicU64,
     /// PIDs of every worker process not yet reaped, idle or busy, so
     /// shutdown can signal the ones it does not hold.
     live: Mutex<HashMap<usize, u32>>,
@@ -152,12 +194,26 @@ struct Lease {
 }
 
 impl Lease {
+    fn new(worker: Worker, inner: &Arc<Inner>) -> Self {
+        inner.busy.fetch_add(1, Ordering::SeqCst);
+        Self {
+            worker: Some(worker),
+            inner: Arc::clone(inner),
+        }
+    }
+
     fn worker(&mut self) -> &mut Worker {
         self.worker.as_mut().expect("lease already finished")
     }
 
+    fn take(&mut self) -> Option<Worker> {
+        let worker = self.worker.take()?;
+        self.inner.busy.fetch_sub(1, Ordering::SeqCst);
+        Some(worker)
+    }
+
     fn finish(mut self, reusable: bool) {
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.take() {
             Arc::clone(&self.inner).release(worker, reusable);
         }
     }
@@ -165,7 +221,7 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
+        if let Some(worker) = self.take() {
             // Without a runtime (process exit), `kill_on_drop` still kills it.
             if tokio::runtime::Handle::try_current().is_ok() {
                 Arc::clone(&self.inner).release(worker, false);
@@ -231,6 +287,10 @@ impl ClassicPool {
                 available: Semaphore::new(workers.len()),
                 idle: Mutex::new(workers),
                 waiting: AtomicUsize::new(0),
+                busy: AtomicUsize::new(0),
+                recycled: AtomicU64::new(0),
+                failed: AtomicU64::new(0),
+                spawn_failures: AtomicU64::new(0),
                 live: Mutex::new(live),
                 config,
                 _socket_dir: socket_dir,
@@ -245,6 +305,23 @@ impl ClassicPool {
     pub fn is_saturated(&self) -> bool {
         self.inner.available.available_permits() == 0
             && self.inner.waiting.load(Ordering::SeqCst) >= self.inner.config.max_queue_size
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        let inner = &self.inner;
+        // Read `busy` after `idle`: a worker moving from idle to busy in
+        // between is counted twice rather than not at all.
+        let idle = inner.idle.lock().unwrap().len();
+        PoolStats {
+            configured: inner.config.count,
+            idle,
+            busy: inner.busy.load(Ordering::SeqCst),
+            waiting: inner.waiting.load(Ordering::SeqCst),
+            recycled: inner.recycled.load(Ordering::Relaxed),
+            failed: inner.failed.load(Ordering::Relaxed),
+            spawn_failures: inner.spawn_failures.load(Ordering::Relaxed),
+            closed: inner.closed.load(Ordering::SeqCst),
+        }
     }
 
     /// PIDs of the worker processes currently alive.
@@ -273,8 +350,9 @@ impl ClassicPool {
         let (body_tx, response_body) = body::channel(BODY_CHANNEL_CAPACITY);
 
         // The exchange runs in its own task so a client that disconnects
-        // cannot leave a worker in the middle of a request.
-        tokio::spawn(async move {
+        // cannot leave a worker in the middle of a request. It keeps the
+        // request's span, so PHP stderr is logged with the request ID.
+        let task = async move {
             let mut lease = lease;
             let mut head_tx = Some(head_tx);
             let result = timeout_at(
@@ -309,7 +387,8 @@ impl ClassicPool {
                 }
             };
             lease.finish(reusable);
-        });
+        };
+        tokio::spawn(task.instrument(Span::current()));
 
         match head_rx.await {
             Ok(Ok(head)) => {
@@ -416,10 +495,7 @@ impl ClassicPool {
         permit.forget();
         let worker = inner.idle.lock().unwrap().pop();
         match worker {
-            Some(worker) => Ok(Lease {
-                worker: Some(worker),
-                inner: Arc::clone(inner),
-            }),
+            Some(worker) => Ok(Lease::new(worker, inner)),
             // Only possible if the pool closed between the permit and here.
             None => Err(ExecError::Unavailable),
         }
@@ -460,8 +536,10 @@ impl Inner {
         // php-cgi exits by itself after PHP_FCGI_MAX_REQUESTS; anything else
         // (error, timeout, crash) is killed straight away.
         let grace = if reusable {
+            self.recycled.fetch_add(1, Ordering::Relaxed);
             RECYCLE_EXIT_TIMEOUT
         } else {
+            self.failed.fetch_add(1, Ordering::Relaxed);
             Duration::ZERO
         };
         tokio::spawn(self.replace(worker, grace));
@@ -491,6 +569,7 @@ impl Inner {
                     return;
                 }
                 Err(err) => {
+                    self.spawn_failures.fetch_add(1, Ordering::Relaxed);
                     error!(worker = id, error = %err, retry_in_ms = backoff.as_millis() as u64,
                         "cannot respawn PHP worker");
                     sleep(backoff).await;

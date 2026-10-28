@@ -35,3 +35,11 @@ max_requests = 1000
 request_timeout_ms = 30000
 # Requests allowed to wait for a free worker; beyond that, 503 + Retry-After.
 max_queue_size = 256
+
+[admin]
+# Separate listener for /health and /metrics. When disabled, both are served
+# on the application listener (and shadow application routes of the same
+# path). Enable it before binding [server] to a non-loopback address.
+enabled = false
+host = "127.0.0.1"
+port = 9180

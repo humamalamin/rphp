@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### Added
+- Observability (phase 4): `RPHP_LOG_FORMAT=json` for one JSON object per
+  log line; an access log (`rphp::access`) without query strings; request
+  IDs from `X-Request-Id` (validated) or generated, returned on every
+  response, passed to PHP as `HTTP_X_REQUEST_ID` and attached to every log
+  line of the request, including PHP stderr.
+- `GET /metrics` in Prometheus text format: requests by handler and status
+  class, latency histogram, in-flight requests, connection errors, failures
+  by source (`http`, `server`, `php`), PHP worker states, queue depth,
+  restarts by reason and spawn failures.
+- `[admin]` section: `enabled`, `host`, `port` (default `127.0.0.1:9180`).
+  When enabled, `/health` and `/metrics` are served only there and the
+  application receives those paths. `rphp check` reports it, and a
+  non-loopback `server.host` without it produces a warning.
 - Backpressure: `worker.max_queue_size` bounds requests waiting for a worker;
   beyond it RPHP answers `503` with `Retry-After: 1`.
 - Supervision: workers that crash (mid-request: 502) or die while idle
@@ -39,6 +52,9 @@
 - Unit and integration tests, CI workflow, `rphp.example.toml`.
 
 ### Changed
+- `/health` answers `503` when no PHP worker is running (all being
+  respawned) or the pool is shutting down.
+- An invalid `RPHP_LOG_FORMAT` is a startup error (exit code 2).
 - A PHP binary without the FastCGI SAPI is now a startup error (was a
   warning).
 - `HEAD /health` reports the same `Content-Length` as `GET`.

@@ -147,7 +147,11 @@ in userland would be a permanent source of compatibility bugs.
 
 ### Observability
 - Structured logs.
-- Health endpoint (`GET` and `HEAD /health`).
+- Health endpoint (`GET` and `HEAD /health`) reflecting PHP worker
+  availability.
+- Request IDs (`X-Request-Id`) in logs, responses and PHP
+  (`HTTP_X_REQUEST_ID`).
+- Health and metrics can be moved to a separate admin listener.
 - Metrics for request count, latency, active workers, queue depth, restarts,
   and errors.
 - Diagnostics that distinguish HTTP server failures from PHP execution
@@ -170,7 +174,7 @@ The MVP is not complete until:
 1. Startup rejects PHP versions below 8.4. *(done)*
 2. The configured PHP binary is resolved and reported. *(done)*
 3. `/health` returns a successful response while the server is healthy.
-   *(done; worker-aware health in phase 4)*
+   *(done; 503 when no PHP worker is running)*
 4. A native PHP front-controller fixture serves requests through `php-cgi`.
    *(done: `tests/fixtures/native/`)*
 5. HTTP method, query, headers, body, status, cookies, and response headers
@@ -217,6 +221,11 @@ count = 4
 max_requests = 1000
 request_timeout_ms = 30000
 max_queue_size = 256
+
+[admin]
+enabled = false
+host = "127.0.0.1"
+port = 9180
 ```
 
 `worker.max_requests` recycles PHP processes in both modes. `worker.mode =
