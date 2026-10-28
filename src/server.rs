@@ -1,9 +1,7 @@
 //! HTTP front end: accept loop, routing, graceful shutdown.
 
-use std::{convert::Infallible, future::Future, io, time::Duration};
+use std::{convert::Infallible, future::Future, io, path::PathBuf, sync::Arc, time::Duration};
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{
     Method, Request, Response, StatusCode,
     body::Incoming,
@@ -18,7 +16,20 @@ use hyper_util::{
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
-pub type ResponseBody = BoxBody<Bytes, Infallible>;
+pub use crate::body::ResponseBody;
+use crate::{
+    backend::{Php, cgi::ConnInfo},
+    body, static_files,
+};
+
+/// What the server serves.
+pub struct App {
+    /// Canonical document root; existing files under it are served directly.
+    pub document_root: PathBuf,
+    /// Front controller for everything else. `None` serves only built-in
+    /// endpoints and static files (used by tests that run without PHP).
+    pub php: Option<Php>,
+}
 
 /// Server behaviour that does not depend on PHP.
 #[derive(Debug, Clone)]
@@ -41,7 +52,12 @@ impl Default for ServerOptions {
 ///
 /// Accept errors never stop the server: per-connection errors are skipped and
 /// resource exhaustion (e.g. `EMFILE`) backs off briefly before retrying.
-pub async fn run<F>(listener: TcpListener, options: ServerOptions, shutdown: F) -> io::Result<()>
+pub async fn run<F>(
+    listener: TcpListener,
+    app: Arc<App>,
+    options: ServerOptions,
+    shutdown: F,
+) -> io::Result<()>
 where
     F: Future<Output = ()>,
 {
@@ -69,7 +85,17 @@ where
                     }
                 };
 
-                let conn = builder.serve_connection(TokioIo::new(stream), service_fn(handle_request));
+                let local_addr = match stream.local_addr() {
+                    Ok(addr) => addr,
+                    Err(err) => {
+                        debug!(%peer_addr, error = %err, "connection closed before it was served");
+                        continue;
+                    }
+                };
+                let info = ConnInfo { remote: peer_addr, local: local_addr };
+                let app = Arc::clone(&app);
+                let service = service_fn(move |req| handle_request(Arc::clone(&app), info, req));
+                let conn = builder.serve_connection(TokioIo::new(stream), service);
                 let conn = graceful.watch(conn);
                 tokio::spawn(async move {
                     if let Err(err) = conn.await {
@@ -110,37 +136,43 @@ fn is_connection_error(err: &io::Error) -> bool {
     )
 }
 
-async fn handle_request(req: Request<Incoming>) -> Result<Response<ResponseBody>, Infallible> {
-    Ok(route(req.method(), req.uri().path()))
+/// Routing order: built-in endpoints, then static files (GET/HEAD), then the
+/// PHP front controller.
+async fn handle_request(
+    app: Arc<App>,
+    conn: ConnInfo,
+    req: Request<Incoming>,
+) -> Result<Response<ResponseBody>, Infallible> {
+    if req.uri().path() == "/health" {
+        return Ok(health(req.method()));
+    }
+    if matches!(*req.method(), Method::GET | Method::HEAD) {
+        if let Some(file) = static_files::lookup(&app.document_root, req.uri().path()).await {
+            return Ok(static_files::serve(file, req.method(), req.headers()).await);
+        }
+    }
+    Ok(match &app.php {
+        Some(php) => php.handle(req, conn).await,
+        None => plain(StatusCode::NOT_IMPLEMENTED, "no PHP backend configured\n"),
+    })
 }
 
-/// Routing is separated from I/O so it can be unit-tested.
-pub fn route(method: &Method, path: &str) -> Response<ResponseBody> {
-    match path {
-        "/health" => match *method {
-            Method::GET => text(StatusCode::OK, "ok\n"),
-            // HEAD: same status and headers as GET, no body.
-            Method::HEAD => {
-                let mut res = text(StatusCode::OK, "");
-                *res.body_mut() = Empty::<Bytes>::new().boxed();
-                res
-            }
-            _ => {
-                let mut res = text(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
-                res.headers_mut()
-                    .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
-                res
-            }
-        },
-        _ => text(
-            StatusCode::NOT_IMPLEMENTED,
-            "RPHP: PHP execution is not implemented yet.\n",
-        ),
+fn health(method: &Method) -> Response<ResponseBody> {
+    match *method {
+        // hyper strips the body from HEAD responses and keeps Content-Length.
+        Method::GET | Method::HEAD => plain(StatusCode::OK, "ok\n"),
+        _ => {
+            let mut res = plain(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
+            res.headers_mut()
+                .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
+            res
+        }
     }
 }
 
-fn text(status: StatusCode, body: &'static str) -> Response<ResponseBody> {
-    let mut res = Response::new(Full::new(Bytes::from_static(body.as_bytes())).boxed());
+/// A short `text/plain` response.
+pub fn plain(status: StatusCode, body: &'static str) -> Response<ResponseBody> {
+    let mut res = Response::new(body::full(body));
     *res.status_mut() = status;
     res.headers_mut().insert(
         CONTENT_TYPE,
@@ -155,26 +187,14 @@ mod tests {
 
     #[test]
     fn health_get_and_head() {
-        assert_eq!(route(&Method::GET, "/health").status(), StatusCode::OK);
-        assert_eq!(route(&Method::HEAD, "/health").status(), StatusCode::OK);
+        assert_eq!(health(&Method::GET).status(), StatusCode::OK);
+        assert_eq!(health(&Method::HEAD).status(), StatusCode::OK);
     }
 
     #[test]
     fn health_rejects_other_methods_with_allow_header() {
-        let res = route(&Method::POST, "/health");
+        let res = health(&Method::POST);
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(res.headers()[ALLOW], "GET, HEAD");
-    }
-
-    #[test]
-    fn everything_else_is_not_implemented() {
-        assert_eq!(
-            route(&Method::GET, "/").status(),
-            StatusCode::NOT_IMPLEMENTED
-        );
-        assert_eq!(
-            route(&Method::POST, "/index.php").status(),
-            StatusCode::NOT_IMPLEMENTED
-        );
     }
 }

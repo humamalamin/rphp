@@ -2,8 +2,7 @@
 
 declare(strict_types=1);
 
-// Development fixture front controller. RPHP validates that this file exists
-// at startup; it is executed once classic mode lands (roadmap phase 2).
+// Development front controller, run through php-cgi by `rphp serve`.
 
 header('Content-Type: text/plain; charset=utf-8');
 

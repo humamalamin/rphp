@@ -1,8 +1,10 @@
 //! Discovery and validation of the PHP interpreter.
 
+pub mod advisory;
 mod resolve;
 mod version;
 
+pub use advisory::Advisory;
 pub use resolve::{ResolveError, resolve_binary};
 pub use version::{MIN_PHP_VERSION_ID, PhpVersion, VersionParseError, parse_version_output};
 
@@ -42,6 +44,12 @@ pub enum ProbeError {
     Unsupported {
         path: PathBuf,
         version: PhpVersion,
+    },
+    /// The version is supported but has a known critical vulnerability.
+    Vulnerable {
+        path: PathBuf,
+        version: PhpVersion,
+        advisories: Vec<&'static Advisory>,
     },
 }
 
@@ -83,13 +91,58 @@ impl fmt::Display for ProbeError {
                 path.display(),
                 version.version_id()
             ),
+            Self::Vulnerable {
+                path,
+                version,
+                advisories,
+            } => {
+                writeln!(
+                    f,
+                    "{} is PHP {version}, which has known critical vulnerabilities. \
+                     RPHP refuses to serve requests with it.",
+                    path.display()
+                )?;
+                for a in advisories {
+                    write!(f, "  - {} ({}): {}.", a.ids.join(", "), a.name, a.summary)?;
+                    if let Some((major, minor, patch)) = a.fixed_in(version) {
+                        write!(
+                            f,
+                            " Fixed in PHP {major}.{minor}.{patch} on the {major}.{minor} branch."
+                        )?;
+                    }
+                    writeln!(f, "\n    Details: {}", a.url)?;
+                }
+                write!(
+                    f,
+                    "Upgrade PHP (or point `[php] binary` at a patched interpreter), then \
+                     restart."
+                )?;
+                if is_distro_build(&version.raw) {
+                    write!(
+                        f,
+                        " Note: {:?} looks like a distribution build. Some distributions \
+                         backport security fixes without changing the upstream version; \
+                         RPHP cannot detect that, so install a package that reports a \
+                         fixed upstream version.",
+                        version.raw
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
+/// Distribution packages append a suffix, e.g. `8.4.5-1ubuntu0.2` or
+/// `8.4.5-1+deb.sury.org+1`.
+fn is_distro_build(raw: &str) -> bool {
+    raw.contains(['-', '+', '~'])
+}
+
 impl std::error::Error for ProbeError {}
 
-/// Resolve `binary`, run `<binary> -v` and enforce the PHP 8.4 minimum.
+/// Resolve `binary`, run `<binary> -v`, enforce the PHP 8.4 minimum and reject
+/// releases with a known critical vulnerability (see [`advisory`]).
 ///
 /// The binary is started directly (no shell), with stdin closed and a timeout,
 /// and is killed if the probe is abandoned.
@@ -128,6 +181,15 @@ pub async fn probe(binary: &str, base_dir: &std::path::Path) -> Result<PhpRuntim
 
     if !version.is_supported() {
         return Err(ProbeError::Unsupported { path, version });
+    }
+
+    let advisories = advisory::affecting(&version);
+    if !advisories.is_empty() {
+        return Err(ProbeError::Vulnerable {
+            path,
+            version,
+            advisories,
+        });
     }
 
     Ok(PhpRuntime { path, version })

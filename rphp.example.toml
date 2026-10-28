@@ -10,7 +10,7 @@ port = 8080
 document_root = "public"
 # Front controller, relative to document_root. Must stay inside it.
 entry_point = "index.php"
-# Largest request body accepted (8 MiB). Enforced once PHP execution lands.
+# Largest request body accepted (8 MiB); larger bodies get 413.
 max_body_bytes = 8388608
 # How long shutdown waits for in-flight connections to finish.
 shutdown_timeout_ms = 10000
@@ -19,7 +19,8 @@ header_read_timeout_ms = 30000
 
 [php]
 # Name on PATH or a path to the interpreter. Classic mode uses the FastCGI
-# SAPI, so php-cgi is expected. PHP 8.4 is the fixed minimum version.
+# SAPI, so php-cgi is expected. PHP 8.4 is the fixed minimum version, and
+# releases with known critical vulnerabilities (e.g. 8.4 < 8.4.27) are refused.
 binary = "php-cgi"
 
 [worker]
@@ -29,5 +30,8 @@ count = 4
 # Requests a PHP process serves before it is recycled
 # (php-cgi's PHP_FCGI_MAX_REQUESTS in classic mode).
 max_requests = 1000
+# Deadline for a whole request: reading the body, waiting for a worker and
+# running PHP. Exceeded: 504, and the worker is killed and replaced.
 request_timeout_ms = 30000
+# Requests allowed to wait for a free worker; beyond that, 503 + Retry-After.
 max_queue_size = 256

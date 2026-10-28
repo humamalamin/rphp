@@ -31,7 +31,7 @@ pub struct ServerConfig {
     pub document_root: PathBuf,
     /// Front controller, relative to `document_root`.
     pub entry_point: String,
-    /// Maximum accepted request body size (enforced from Phase 2).
+    /// Maximum accepted request body size; larger bodies get 413.
     pub max_body_bytes: u64,
     /// How long shutdown waits for in-flight connections.
     pub shutdown_timeout_ms: u64,
@@ -73,7 +73,9 @@ pub struct WorkerConfig {
     /// this maps to php-cgi's `PHP_FCGI_MAX_REQUESTS`; request isolation is
     /// still provided by the CGI SAPI.
     pub max_requests: u64,
+    /// Deadline for a whole request, including waiting for a worker.
     pub request_timeout_ms: u64,
+    /// Requests allowed to wait for a free worker before new ones get 503.
     pub max_queue_size: usize,
 }
 
@@ -133,6 +135,10 @@ impl ValidatedConfig {
 
     pub fn header_read_timeout(&self) -> Duration {
         Duration::from_millis(self.raw.server.header_read_timeout_ms)
+    }
+
+    pub fn request_timeout(&self) -> Duration {
+        Duration::from_millis(self.raw.worker.request_timeout_ms)
     }
 }
 

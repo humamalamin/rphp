@@ -1,8 +1,13 @@
-use std::{path::Path, process::ExitCode};
+use std::{path::Path, process::ExitCode, sync::Arc};
 
 use rphp::{
+    backend::{
+        Php,
+        cgi::Script,
+        classic::{ClassicPool, PoolConfig},
+    },
     cli::{self, Command},
-    server::{self, ServerOptions},
+    server::{self, App, ServerOptions},
 };
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
@@ -90,6 +95,28 @@ async fn serve(config: Option<&Path>) -> Result<(), Box<dyn std::error::Error + 
         warn!("{warning}");
     }
 
+    let raw = &pre.config.raw;
+    let pool = ClassicPool::start(PoolConfig {
+        binary: pre.php.path.clone(),
+        count: raw.worker.count,
+        max_requests: raw.worker.max_requests,
+        max_queue_size: raw.worker.max_queue_size,
+        working_dir: pre.config.document_root.clone(),
+    })
+    .await?;
+    let app = Arc::new(App {
+        document_root: pre.config.document_root.clone(),
+        php: Some(Php {
+            pool: pool.clone(),
+            script: Script::new(
+                pre.config.document_root.clone(),
+                pre.config.entry_point.clone(),
+            ),
+            max_body_bytes: raw.server.max_body_bytes,
+            request_timeout: pre.config.request_timeout(),
+        }),
+    });
+
     let listener = TcpListener::bind(pre.config.listen)
         .await
         .map_err(|err| format!("cannot listen on {}: {err}", pre.config.listen))?;
@@ -99,7 +126,11 @@ async fn serve(config: Option<&Path>) -> Result<(), Box<dyn std::error::Error + 
         shutdown_timeout: pre.config.shutdown_timeout(),
         header_read_timeout: pre.config.header_read_timeout(),
     };
-    server::run(listener, options, shutdown_signal()).await?;
+    let result = server::run(listener, app, options, shutdown_signal()).await;
+    // HTTP is drained (or timed out) first, then PHP processes get SIGTERM
+    // and the same grace period before SIGKILL.
+    pool.shutdown(pre.config.shutdown_timeout()).await;
+    result?;
     info!("RPHP stopped");
     Ok(())
 }

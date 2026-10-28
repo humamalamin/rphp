@@ -1,12 +1,20 @@
 //! RPHP: a Rust-powered PHP application server.
 //!
-//! Current scope (roadmap phase 1): configuration, PHP discovery and version
-//! enforcement, and the HTTP shell. PHP execution is not implemented yet.
+//! Current scope (roadmap phase 2): configuration, PHP discovery and version
+//! enforcement, the HTTP server, static files, and classic-mode execution
+//! over FastCGI to a pool of `php-cgi` processes.
 
+#[cfg(not(unix))]
+compile_error!("RPHP currently supports Unix-like systems only (Linux first; see SPEC.md).");
+
+pub mod backend;
+pub mod body;
 pub mod cli;
 pub mod config;
+pub mod fastcgi;
 pub mod php;
 pub mod server;
+pub mod static_files;
 
 use config::{ConfigSource, ValidatedConfig};
 use php::PhpRuntime;
@@ -25,6 +33,17 @@ pub async fn preflight(
 ) -> Result<Preflight, Box<dyn std::error::Error + Send + Sync>> {
     let (config, source) = config::load(config_path)?;
     let php = php::probe(&config.raw.php.binary, &config.base_dir).await?;
+    // Classic mode (the only mode so far) speaks FastCGI.
+    if !php.version.is_fastcgi() {
+        return Err(format!(
+            "{} reports SAPI {:?}, but classic mode needs the FastCGI SAPI \
+             (cgi-fcgi). Install php-cgi (e.g. the php8.4-cgi package) and set \
+             `[php] binary = \"php-cgi\"`.",
+            php.path.display(),
+            php.version.sapi.as_deref().unwrap_or("unknown")
+        )
+        .into());
+    }
     Ok(Preflight {
         config,
         source,
@@ -39,14 +58,6 @@ pub fn warnings(pre: &Preflight) -> Vec<String> {
         warnings.push(format!(
             "listening on {} which is not a loopback address; the server is reachable from the network",
             pre.config.listen
-        ));
-    }
-    if !pre.php.version.is_fastcgi() {
-        warnings.push(format!(
-            "{} reports SAPI {:?}; classic mode will need the FastCGI SAPI (php-cgi). \
-             This becomes an error once PHP execution lands (roadmap phase 2).",
-            pre.php.path.display(),
-            pre.php.version.sapi.as_deref().unwrap_or("unknown")
         ));
     }
     warnings

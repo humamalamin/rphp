@@ -18,22 +18,22 @@ tasks and exit gates for each phase are in
 - [x] Graceful shutdown (Ctrl+C, SIGTERM) and resilient accept loop
 - [x] Structured logging
 - [x] Unit and integration tests for config, version, CLI, HTTP
-- [ ] CI green on PHP 8.4 and 8.5
+- [x] CI green on PHP 8.4 and 8.5
 
 ## Phase 2 — Classic PHP execution over FastCGI (weeks 3–5)
-- [ ] FastCGI record codec with bounded lengths
-- [ ] `php-cgi` process pool, no shell, cleared environment
-- [ ] Request environment mapping (CGI/1.1 variables, httpoxy guard)
-- [ ] Response mapping (status, headers, cookies, streaming body)
-- [ ] Body size, request timeout and response header limits
-- [ ] Static file serving
-- [ ] Native PHP fixture integration tests
+- [x] FastCGI record codec with bounded lengths
+- [x] `php-cgi` process pool, no shell, cleared environment
+- [x] Request environment mapping (CGI/1.1 variables, httpoxy guard)
+- [x] Response mapping (status, headers, cookies, streaming body)
+- [x] Body size, request timeout and response header limits
+- [x] Static file serving
+- [x] Native PHP fixture integration tests
 
 ## Phase 3 — Supervision and backpressure (weeks 5–6)
-- [ ] Bounded queue and 503 backpressure
-- [ ] Worker crash detection and replacement
-- [ ] Ordered graceful shutdown of PHP processes
-- [ ] Failure-injection tests, no orphaned processes
+- [x] Bounded queue and 503 backpressure
+- [x] Worker crash detection and replacement
+- [x] Ordered graceful shutdown of PHP processes
+- [x] Failure-injection tests, no orphaned processes
 
 ## Phase 4 — Observability (week 7)
 - [ ] JSON logs and request IDs

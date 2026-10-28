@@ -1,8 +1,8 @@
 //! End-to-end tests for the HTTP shell over real TCP sockets.
 
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use rphp::server::{self, ServerOptions};
+use rphp::server::{self, App, ServerOptions};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -14,26 +14,61 @@ struct TestServer {
     addr: std::net::SocketAddr,
     stop: Option<oneshot::Sender<()>>,
     handle: JoinHandle<std::io::Result<()>>,
+    root: PathBuf,
+}
+
+/// A document root with a few static files, served without a PHP backend.
+fn document_root() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "rphp-http-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let public = dir.join("public");
+    std::fs::create_dir_all(public.join("css")).unwrap();
+    std::fs::write(public.join("css/app.css"), "body{}\n").unwrap();
+    std::fs::write(public.join("index.php"), "<?php echo 'secret';").unwrap();
+    std::fs::write(public.join(".env"), "SECRET=1").unwrap();
+    std::fs::write(dir.join("outside.txt"), "outside").unwrap();
+    std::os::unix::fs::symlink(dir.join("outside.txt"), public.join("link.txt")).unwrap();
+    public.canonicalize().unwrap()
 }
 
 async fn start(options: ServerOptions) -> TestServer {
+    let root = document_root();
+    let app = Arc::new(App {
+        document_root: root.clone(),
+        php: None,
+    });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, stopped) = oneshot::channel::<()>();
-    let handle = tokio::spawn(server::run(listener, options, async {
+    let handle = tokio::spawn(server::run(listener, app, options, async {
         let _ = stopped.await;
     }));
     TestServer {
         addr,
         stop: Some(stop),
         handle,
+        root,
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        if let Some(app_dir) = self.root.parent() {
+            let _ = std::fs::remove_dir_all(app_dir);
+        }
     }
 }
 
 impl TestServer {
     async fn shutdown(mut self) {
         self.stop.take().unwrap().send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), self.handle)
+        tokio::time::timeout(Duration::from_secs(5), &mut self.handle)
             .await
             .expect("server did not stop in time")
             .unwrap()
@@ -69,6 +104,10 @@ async fn health_endpoint() {
     let res = request(srv.addr, "HEAD", "/health").await;
     assert!(res.starts_with("HTTP/1.1 200 OK\r\n"), "{res}");
     assert!(
+        res.to_ascii_lowercase().contains("content-length: 3\r\n"),
+        "HEAD must report the GET length: {res:?}"
+    );
+    assert!(
         res.ends_with("\r\n\r\n"),
         "HEAD must not have a body: {res:?}"
     );
@@ -87,10 +126,46 @@ async fn health_endpoint() {
 }
 
 #[tokio::test]
-async fn other_paths_are_not_implemented() {
+async fn serves_static_files() {
     let srv = start(ServerOptions::default()).await;
-    let res = request(srv.addr, "GET", "/index.php?x=1").await;
-    assert!(res.starts_with("HTTP/1.1 501 Not Implemented\r\n"), "{res}");
+
+    let res = request(srv.addr, "GET", "/css/app.css").await;
+    assert!(res.starts_with("HTTP/1.1 200 OK\r\n"), "{res}");
+    let lower = res.to_ascii_lowercase();
+    assert!(
+        lower.contains("content-type: text/css; charset=utf-8"),
+        "{res}"
+    );
+    assert!(lower.contains("content-length: 7\r\n"), "{res}");
+    assert!(lower.contains("last-modified: "), "{res}");
+    assert!(res.ends_with("\r\n\r\nbody{}\n"), "{res}");
+
+    let res = request(srv.addr, "HEAD", "/css/app.css").await;
+    assert!(
+        res.to_ascii_lowercase().contains("content-length: 7\r\n"),
+        "{res}"
+    );
+    assert!(res.ends_with("\r\n\r\n"), "{res:?}");
+
+    srv.shutdown().await;
+}
+
+#[tokio::test]
+async fn never_serves_php_source_hidden_files_or_escaping_symlinks() {
+    let srv = start(ServerOptions::default()).await;
+    // Without a PHP backend, anything that is not static ends up as 501.
+    for path in [
+        "/index.php",
+        "/.env",
+        "/link.txt",
+        "/../outside.txt",
+        "/missing.css",
+        "/",
+    ] {
+        let res = request(srv.addr, "GET", path).await;
+        assert!(res.starts_with("HTTP/1.1 501 "), "{path}: {res}");
+        assert!(!res.contains("secret") && !res.contains("SECRET") && !res.contains("outside"));
+    }
     srv.shutdown().await;
 }
 

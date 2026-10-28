@@ -63,6 +63,11 @@ do not, the documentation must say so.
 - Minimum supported interpreter: PHP 8.4 (`PHP_VERSION_ID >= 80400`).
 - The minimum is project policy and cannot be lowered by configuration.
 - Older versions are rejected at startup with an actionable message.
+- Releases with a known critical vulnerability are also rejected, per branch
+  (e.g. PHP2Shell, CVE-2026-109618/109619: 8.4 < 8.4.27 and 8.5 < 8.5.12).
+  The list is maintained in `src/php/advisory.rs`. Distribution builds that
+  backport a fix without changing the upstream version cannot be told apart
+  and are rejected too.
 - Newer PHP versions are CI and compatibility-testing targets.
 - The PHP executable is configurable (name on `PATH` or path).
 
@@ -167,8 +172,9 @@ The MVP is not complete until:
 3. `/health` returns a successful response while the server is healthy.
    *(done; worker-aware health in phase 4)*
 4. A native PHP front-controller fixture serves requests through `php-cgi`.
+   *(done: `tests/fixtures/native/`)*
 5. HTTP method, query, headers, body, status, cookies, and response headers
-   are tested.
+   are tested. *(done: `tests/classic.rs`)*
 6. Worker timeout and crash behavior are tested; no orphaned processes.
 7. Persistent mode cannot be enabled by default before isolation tests pass.
    *(enforced: currently rejected)*

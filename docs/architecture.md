@@ -84,7 +84,7 @@ Persistent mode must address:
 3. Signal open connections to finish (idle keep-alive connections close
    immediately).
 4. Wait up to `server.shutdown_timeout_ms`, then drop what remains.
-5. (Phase 3) Stop PHP processes: SIGTERM, then SIGKILL after a timeout.
+5. Stop PHP processes: SIGTERM, then SIGKILL after the same timeout.
 
 ## Module layout
 
@@ -96,8 +96,9 @@ Single crate until boundaries are stable.
 | `config` | implemented |
 | `php` (discovery, version) | implemented |
 | `server` | implemented |
-| `fastcgi` | phase 2 |
-| `backend` (classic pool) | phase 2 |
-| `supervisor` | phase 3 |
+| `fastcgi` (codec) | implemented |
+| `backend` (CGI mapping, classic pool) | implemented |
+| `static_files` | implemented |
+| supervisor (queue, crash replacement, shutdown) | implemented, in `backend::classic` |
 | `observability` | phase 4 |
 | `protocol` (persistent worker) | phase 5 |

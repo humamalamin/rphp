@@ -58,12 +58,12 @@ Deliverables:
 
 Exit gate:
 
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` green in
+- [x] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` green in
       CI on Linux with PHP 8.4.
-- [ ] `rphp check` rejects PHP 8.3 and accepts PHP 8.4 (covered by
+- [x] `rphp check` rejects PHP 8.3 and accepts PHP 8.4 (covered by
       `tests/php_probe.rs` with stand-in binaries).
 
-## Phase 2 — Classic execution over FastCGI (2–3 weeks)
+## Phase 2 — Classic execution over FastCGI (implemented; exit gate pending CI)
 
 Module: `src/fastcgi/` (protocol codec), `src/backend/classic.rs` (pool).
 
@@ -94,7 +94,27 @@ Exit gate: fixture `tests/fixtures/native/` exercising method, query,
 headers, body, status, redirects, multiple cookies, uploads, `php://input`,
 and a script that exceeds the timeout. All pass.
 
-## Phase 3 — Supervision and backpressure (1–2 weeks)
+Implementation notes:
+
+- One Unix-socket connection per request, no `FCGI_KEEP_CONN`; sockets live in
+  a private `0700` directory under the temp dir.
+- RPHP counts requests per worker and respawns it after `max_requests`
+  (php-cgi exits by itself at the same count). Errors and timeouts kill and
+  replace the worker. Respawn failures back off exponentially up to 30s.
+- Request bodies are buffered (bounded by `max_body_bytes`) so that
+  `CONTENT_LENGTH` is exact, including for chunked uploads. Responses stream.
+- The request deadline (`request_timeout_ms`) covers reading the body,
+  waiting for a worker and the whole PHP exchange. Before the response head:
+  504. After it: the stream is aborted.
+- Response head limit: 64 KiB (502 beyond that).
+- Static files: regular files inside the document root after symlink
+  resolution; never PHP source extensions or hidden files (except
+  `.well-known`). Everything else goes to the entry point.
+- Known gaps, deferred: no pass-through of application environment variables
+  (cleared environment only), no ETag or Range for static files, `/health`
+  shadows an application route of the same path.
+
+## Phase 3 — Supervision and backpressure (implemented; exit gate pending CI)
 
 - Bounded queue (`max_queue_size`); 503 with `Retry-After` when full.
 - Acquire-a-worker timeout counts against the request deadline.
@@ -107,6 +127,26 @@ and a script that exceeds the timeout. All pass.
 
 Exit gate: failure-injection suite green; no orphaned `php-cgi` processes after
 any test (checked by the test harness).
+
+Implementation notes:
+
+- `max_queue_size` bounds requests *waiting* for a worker (running requests
+  are bounded by `count`). A full queue answers `503` with `Retry-After: 1`,
+  checked once before the body is read and again, binding, at checkout.
+- A checked-out worker is held by a lease; dropping it without finishing (a
+  cancelled request, an aborted task) replaces the worker, so the pool never
+  shrinks.
+- A worker that died while idle, or whose socket refuses connections, is
+  replaced at checkout and the request moves to the next worker: nothing was
+  sent to PHP yet, so the retry is safe. A crash mid-request is a 502.
+- Shutdown: HTTP drain (`shutdown_timeout_ms`), then SIGTERM to every worker
+  (php-cgi finishes its current request and exits), then SIGKILL after the
+  same timeout.
+- On Linux, workers get `PR_SET_PDEATHSIG=SIGKILL`, so they also die if RPHP
+  itself is killed with SIGKILL.
+- Not done: no per-worker memory limit. Do not add one with
+  `RLIMIT_AS`/`RLIMIT_DATA`: allocation failures reach the PHP2Shell
+  (CVE-2026-109618) code path.
 
 ## Phase 4 — Observability (1 week)
 

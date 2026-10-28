@@ -7,6 +7,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # tests/classic.rs fails instead of skipping when php-cgi is missing.
+  RPHP_REQUIRE_PHP: "1"
 
 jobs:
   test:
@@ -32,6 +34,7 @@ jobs:
 
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: php-cgi -v
       - run: cargo test
 
       # End-to-end preflight against the real interpreter.
