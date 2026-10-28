@@ -7,8 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # tests/classic.rs fails instead of skipping when php-cgi is missing.
+  # tests/classic.rs and tests/persistent.rs fail instead of skipping when
+  # php-cgi or the PHP CLI is missing; the PSR-7 test needs php/worker/vendor.
   RPHP_REQUIRE_PHP: "1"
+  RPHP_REQUIRE_PSR7: "1"
 
 jobs:
   test:
@@ -24,7 +26,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          tools: none
+          tools: composer
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,6 +37,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: php-cgi -v
+      - run: php -v
+      - name: Install rphp/worker dev dependencies (PSR-7 test)
+        run: composer install --no-interaction --no-progress
+        working-directory: php/worker
       - run: cargo test
 
       # End-to-end preflight against the real interpreter.

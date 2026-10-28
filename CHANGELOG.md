@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- Persistent mode (phase 5, experimental, opt-in): `worker.mode =
+  "persistent"` runs `worker.script` on the PHP CLI as long-lived workers
+  that boot the application once. New keys `worker.script`,
+  `worker.max_age_secs` (both modes) and `worker.max_memory_mb`. Protocol in
+  `docs/worker-protocol.md`; behaviour and limits in
+  `docs/persistent-mode.md`; example in `examples/persistent/`.
+- `rphp/worker` PHP package (`php/worker`): worker loop with `Request`,
+  `Response`, reset hooks and a PSR-7 adapter (`Psr7Worker`).
+- `scripts/test-php.sh` and `docker/test.Containerfile`: run every test, or
+  `rphp serve`, against a real PHP 8.4 in a container without installing PHP.
 - Observability (phase 4): `RPHP_LOG_FORMAT=json` for one JSON object per
   log line; an access log (`rphp::access`) without query strings; request
   IDs from `X-Request-Id` (validated) or generated, returned on every
@@ -52,6 +62,8 @@
 - Unit and integration tests, CI workflow, `rphp.example.toml`.
 
 ### Changed
+- The worker pool is shared by both modes (`backend::pool`); `ClassicPool`
+  is now `Pool<Classic>`, started with `Pool::start(kind, PoolConfig)`.
 - `/health` answers `503` when no PHP worker is running (all being
   respawned) or the pool is shutting down.
 - An invalid `RPHP_LOG_FORMAT` is a startup error (exit code 2).

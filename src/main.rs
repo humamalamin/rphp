@@ -2,11 +2,14 @@ use std::{path::Path, process::ExitCode, sync::Arc};
 
 use rphp::{
     backend::{
-        Php,
+        Php, PhpPool,
         cgi::Script,
-        classic::{ClassicPool, PoolConfig},
+        classic::{Classic, ClassicPool},
+        persistent::{Persistent, PersistentPool},
+        pool::PoolConfig,
     },
     cli::{self, Command},
+    config::WorkerMode,
     logging::{self, LogFormat},
     metrics::Metrics,
     server::{self, Admin, App, ServerOptions},
@@ -67,6 +70,9 @@ async fn check(config: Option<&Path>) -> ExitCode {
                 pre.php.version.version_id()
             );
             println!("worker mode:   {}", pre.config.raw.worker.mode);
+            if let Some(script) = &pre.config.worker_script {
+                println!("worker script: {}", script.display());
+            }
             match pre.config.admin_listen {
                 Some(addr) => println!("admin listen:  {addr} (/health, /metrics)"),
                 None => println!("admin listen:  disabled (/health, /metrics on main listener)"),
@@ -99,14 +105,38 @@ async fn serve(config: Option<&Path>) -> Result<(), Box<dyn std::error::Error + 
     }
 
     let raw = &pre.config.raw;
-    let pool = ClassicPool::start(PoolConfig {
-        binary: pre.php.path.clone(),
+    let pool_config = PoolConfig {
         count: raw.worker.count,
         max_requests: raw.worker.max_requests,
         max_queue_size: raw.worker.max_queue_size,
-        working_dir: pre.config.document_root.clone(),
-    })
-    .await?;
+        max_age: pre.config.max_age(),
+    };
+    let pool: PhpPool = match raw.worker.mode {
+        WorkerMode::Classic => {
+            let kind = Classic {
+                binary: pre.php.path.clone(),
+                working_dir: pre.config.document_root.clone(),
+            };
+            ClassicPool::start(kind, pool_config).await?.into()
+        }
+        WorkerMode::Persistent => {
+            let script = pre
+                .config
+                .worker_script
+                .clone()
+                .expect("validated: persistent mode has a worker script");
+            let kind = Persistent {
+                binary: pre.php.path.clone(),
+                working_dir: script
+                    .parent()
+                    .unwrap_or(&pre.config.base_dir)
+                    .to_path_buf(),
+                script,
+                max_memory: pre.config.max_memory_bytes(),
+            };
+            PersistentPool::start(kind, pool_config).await?.into()
+        }
+    };
     let metrics = Arc::new(Metrics::new());
     let app = Arc::new(App {
         document_root: pre.config.document_root.clone(),

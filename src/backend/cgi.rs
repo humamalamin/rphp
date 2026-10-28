@@ -111,7 +111,7 @@ impl Params {
     }
 }
 
-fn protocol(version: Version) -> &'static str {
+pub(crate) fn protocol(version: Version) -> &'static str {
     match version {
         Version::HTTP_10 => "HTTP/1.0",
         Version::HTTP_2 => "HTTP/2.0",
@@ -140,7 +140,7 @@ fn http_var(name: &HeaderName) -> Option<String> {
 }
 
 /// Host header without its port, falling back to the local address.
-fn server_name(headers: &HeaderMap, local: SocketAddr) -> String {
+pub(crate) fn server_name(headers: &HeaderMap, local: SocketAddr) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
@@ -196,6 +196,11 @@ const HOP_BY_HOP: [HeaderName; 5] = [
     header::UPGRADE,
 ];
 
+/// True for headers that describe the PHP <-> RPHP hop, not the response.
+pub(crate) fn is_hop_by_hop(name: &HeaderName) -> bool {
+    HOP_BY_HOP.contains(name) || name.as_str() == "keep-alive"
+}
+
 /// Parse a CGI header block (without the terminating blank line).
 pub fn parse_head(block: &[u8]) -> Result<Head, String> {
     let mut status = None;
@@ -218,7 +223,7 @@ pub fn parse_head(block: &[u8]) -> Result<Head, String> {
             status = Some(parse_status(value)?);
             continue;
         }
-        if HOP_BY_HOP.contains(&name) || name.as_str() == "keep-alive" {
+        if is_hop_by_hop(&name) {
             continue;
         }
         let value = HeaderValue::from_bytes(value)

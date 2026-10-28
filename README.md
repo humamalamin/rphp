@@ -6,7 +6,7 @@ supported interpreter version.
 
 ## Status
 
-Phase 4 of the [roadmap](docs/roadmap.md). Implemented:
+Phase 5 of the [roadmap](docs/roadmap.md). Implemented:
 
 - `rphp.toml` configuration with validation (unknown keys rejected, all
   problems reported at once, paths checked before startup)
@@ -23,7 +23,13 @@ Phase 4 of the [roadmap](docs/roadmap.md). Implemented:
   (`X-Request-Id`, also visible to PHP), Prometheus `/metrics`, a `/health`
   that reflects worker availability, and an optional admin listener
 
-**Not implemented yet:** persistent mode, framework compatibility testing and production hardening.
+- Persistent mode (**experimental**, opt-in): PHP CLI workers that boot the
+  application once and serve many requests, with the
+  [`rphp/worker`](php/worker/README.md) loop and a PSR-7 adapter. Read
+  [docs/persistent-mode.md](docs/persistent-mode.md) before using it.
+
+**Not implemented yet:** framework compatibility testing, benchmarks and
+production hardening.
 
 ## Requirements
 
@@ -81,9 +87,18 @@ cargo fmt --check
 ```
 
 The PHP discovery tests use stand-in executables, so they pass without PHP
-installed and can simulate PHP 8.3 and 8.4. The classic-mode tests in
-`tests/classic.rs` need `php-cgi` 8.4+ on `PATH`; they skip without it unless
-`RPHP_REQUIRE_PHP=1` is set (as in CI).
+installed and can simulate PHP 8.3 and 8.4. The end-to-end tests
+(`tests/classic.rs`, `tests/persistent.rs`) need `php-cgi` and the PHP CLI
+8.4+ on `PATH`; they skip without them unless `RPHP_REQUIRE_PHP=1` is set (as
+in CI). The PSR-7 test also needs `composer install` in `php/worker`.
+
+Without PHP on the host, run everything in a container (Docker or Podman):
+
+```bash
+scripts/test-php.sh                  # all tests against PHP 8.4
+scripts/test-php.sh serve            # rphp serve, reachable on 127.0.0.1:8080
+scripts/test-php.sh cargo clippy --all-targets -- -D warnings
+```
 
 ## Project documents
 
@@ -92,8 +107,10 @@ installed and can simulate PHP 8.3 and 8.4. The classic-mode tests in
   tasks and exit gates per phase
 - [`docs/architecture.md`](docs/architecture.md): architecture
 - [`docs/roadmap.md`](docs/roadmap.md): phase checklist
-- [`docs/worker-protocol.md`](docs/worker-protocol.md): persistent-mode IPC
-  design notes
+- [`docs/persistent-mode.md`](docs/persistent-mode.md): persistent mode,
+  what persists between requests, what does not work
+- [`docs/worker-protocol.md`](docs/worker-protocol.md): persistent-mode wire
+  protocol
 
 ## Design principles
 

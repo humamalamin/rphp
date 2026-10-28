@@ -1,8 +1,9 @@
 //! RPHP: a Rust-powered PHP application server.
 //!
-//! Current scope (roadmap phase 4): configuration, PHP discovery and version
+//! Current scope (roadmap phase 5): configuration, PHP discovery and version
 //! enforcement, the HTTP server, static files, classic-mode execution over
-//! FastCGI to a supervised pool of `php-cgi` processes, structured logs,
+//! FastCGI to a supervised pool of `php-cgi` processes, an experimental
+//! persistent mode (PHP CLI workers running `rphp/worker`), structured logs,
 //! request IDs, Prometheus metrics and an optional admin listener.
 
 #[cfg(not(unix))]
@@ -20,7 +21,7 @@ pub mod request_id;
 pub mod server;
 pub mod static_files;
 
-use config::{ConfigSource, ValidatedConfig};
+use config::{ConfigSource, ValidatedConfig, WorkerMode};
 use php::PhpRuntime;
 
 /// Everything that must be true before RPHP accepts traffic.
@@ -37,16 +38,28 @@ pub async fn preflight(
 ) -> Result<Preflight, Box<dyn std::error::Error + Send + Sync>> {
     let (config, source) = config::load(config_path)?;
     let php = php::probe(&config.raw.php.binary, &config.base_dir).await?;
-    // Classic mode (the only mode so far) speaks FastCGI.
-    if !php.version.is_fastcgi() {
-        return Err(format!(
-            "{} reports SAPI {:?}, but classic mode needs the FastCGI SAPI \
-             (cgi-fcgi). Install php-cgi (e.g. the php8.4-cgi package) and set \
-             `[php] binary = \"php-cgi\"`.",
-            php.path.display(),
-            php.version.sapi.as_deref().unwrap_or("unknown")
-        )
-        .into());
+    // Classic mode speaks FastCGI to php-cgi; persistent mode runs the
+    // worker script with the CLI.
+    let sapi = php.version.sapi.as_deref().unwrap_or("unknown");
+    match config.raw.worker.mode {
+        WorkerMode::Classic if !php.version.is_fastcgi() => {
+            return Err(format!(
+                "{} reports SAPI {sapi:?}, but classic mode needs the FastCGI SAPI \
+                 (cgi-fcgi). Install php-cgi (e.g. the php8.4-cgi package) and set \
+                 `[php] binary = \"php-cgi\"`.",
+                php.path.display(),
+            )
+            .into());
+        }
+        WorkerMode::Persistent if sapi != "cli" => {
+            return Err(format!(
+                "{} reports SAPI {sapi:?}, but persistent mode runs the worker script \
+                 with the PHP CLI. Set `[php] binary = \"php\"`.",
+                php.path.display(),
+            )
+            .into());
+        }
+        _ => {}
     }
     Ok(Preflight {
         config,
@@ -58,6 +71,14 @@ pub async fn preflight(
 /// Non-fatal findings worth telling the operator about.
 pub fn warnings(pre: &Preflight) -> Vec<String> {
     let mut warnings = Vec::new();
+    if pre.config.raw.worker.mode == WorkerMode::Persistent {
+        warnings.push(
+            "worker.mode = \"persistent\" is experimental: application state survives \
+             between requests, so the application must be written for it (see \
+             docs/persistent-mode.md)"
+                .into(),
+        );
+    }
     if !pre.config.is_loopback() {
         warnings.push(format!(
             "listening on {} which is not a loopback address; the server is reachable from the network",

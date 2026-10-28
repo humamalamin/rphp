@@ -189,7 +189,7 @@ Implementation notes:
 - Not done: per-worker metrics (by worker ID), OpenTelemetry/trace context
   (`traceparent`) propagation, log sampling.
 
-## Phase 5 — Persistent worker prototype, PSR-7 (3 weeks)
+## Phase 5 — Persistent worker prototype, PSR-7 (implemented; exit gate pending CI)
 
 - Finalise `worker-protocol.md` (framed, versioned, bounded) and implement it
   over a Unix socket.
@@ -199,6 +199,31 @@ Implementation notes:
 - State-leak test suite: static properties, globals, singletons, sessions,
   output buffers, `register_shutdown_function`.
 - Remains opt-in and marked experimental.
+
+Implementation notes:
+
+- The supervised pool (queue, leases, recycling, shutdown, stats) moved from
+  `backend::classic` to a generic `backend::pool` used by both modes; a mode
+  only says how to spawn a worker and how to run a request on it.
+- Transport: one Unix socket per worker; RPHP listens, the worker connects,
+  and only the worker's PID is accepted (`SO_PEERCRED`). The connection is
+  kept for the worker's lifetime.
+- `rphp/worker` lives in this repository (`php/worker`) so protocol changes
+  land in one commit. Core loop has no dependencies; `Psr7Worker` needs only
+  the PSR-7/PSR-17 interfaces.
+- Exceptions (including PHP 8 `Error`) give `500` without details; the
+  worker runs its reset hooks and is reused (as in Laravel Octane), so a
+  client cannot force an application reboot per request. Fatal errors and
+  `exit()` kill it (`502`).
+- Request heads that do not fit one frame (1 MiB after JSON encoding) get
+  `431` before reaching a worker.
+- Stopping a worker closes its connection first, so idle workers leave their
+  loop at once instead of waiting for SIGKILL.
+- State-leak tests cover static state, `onReset()`, output buffers and
+  superglobals. Not covered yet: native sessions (unsupported) and
+  `register_shutdown_function` (runs at worker exit; documented).
+- Known gaps: multipart bodies are not parsed for the application;
+  `server.entry_point` must still exist in persistent mode.
 
 ## Phase 6 — Framework fixtures (2 weeks)
 

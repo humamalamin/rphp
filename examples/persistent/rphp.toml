@@ -1,0 +1,21 @@
+# Persistent-mode example (experimental). Run from the repository root:
+#
+#   scripts/test-php.sh serve --config examples/persistent/rphp.toml
+#
+# then: curl -i http://127.0.0.1:8080/hello
+
+[server]
+document_root = "public"
+
+[php]
+# Persistent workers run on the PHP CLI, not php-cgi.
+binary = "php"
+
+[worker]
+mode = "persistent"
+script = "worker.php"
+count = 2
+# Recycle workers to bound the damage of leaks in long-running PHP.
+max_requests = 500
+max_age_secs = 3600
+max_memory_mb = 128

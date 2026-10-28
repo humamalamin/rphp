@@ -41,11 +41,11 @@ tasks and exit gates for each phase are in
 - [x] Health reflects worker availability; admin listener
 
 ## Phase 5 — Persistent worker prototype (weeks 8–10)
-- [ ] Framed worker protocol (see `worker-protocol.md`)
-- [ ] PHP-side PSR-7 worker loop (`rphp/worker`)
-- [ ] Recycling by count, age, memory
-- [ ] State leakage tests
-- [ ] Explicit compatibility documentation
+- [x] Framed worker protocol (see `worker-protocol.md`)
+- [x] PHP-side PSR-7 worker loop (`rphp/worker`)
+- [x] Recycling by count, age, memory
+- [x] State leakage tests
+- [x] Explicit compatibility documentation (`persistent-mode.md`)
 
 ## Phase 6 — Framework fixtures (weeks 10–12)
 - [ ] Native PHP

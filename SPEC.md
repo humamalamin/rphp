@@ -110,6 +110,10 @@ in userland would be a permanent source of compatibility bugs.
   memory-growth tests before it can be recommended.
 - Worker recycling, timeouts, crash recovery, and bounded concurrency are
   required.
+- Implemented (phase 5) as an experimental, opt-in prototype: PHP CLI
+  workers running the `rphp/worker` loop over the protocol in
+  `docs/worker-protocol.md`. What persists between requests and what does
+  not work is listed in `docs/persistent-mode.md`.
 - Rejected by configuration validation until it is implemented.
 
 ## 6. Functional requirements
@@ -228,5 +232,7 @@ host = "127.0.0.1"
 port = 9180
 ```
 
-`worker.max_requests` recycles PHP processes in both modes. `worker.mode =
-"persistent"` is rejected until roadmap phase 5.
+`worker.max_requests` and `worker.max_age_secs` recycle PHP processes in both
+modes. `worker.mode = "persistent"` (experimental) also needs
+`worker.script` and `php.binary = "php"`, and accepts `worker.max_memory_mb`;
+see `docs/persistent-mode.md`.

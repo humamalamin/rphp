@@ -10,7 +10,8 @@
    between the HTTP layer and a backend.
 4. **Execution backends**:
    - classic: FastCGI client talking to a pool of `php-cgi` processes;
-   - persistent (later): framed worker protocol to a PHP-side worker loop.
+   - persistent (experimental): framed worker protocol to PHP CLI workers
+     running the `rphp/worker` loop (`php/worker`).
 5. **Worker supervisor**: process health, queueing, restart, recycling, and
    shutdown ordering.
 6. **Observability**: structured logs, health, and metrics.
@@ -97,8 +98,9 @@ Single crate until boundaries are stable.
 | `php` (discovery, version) | implemented |
 | `server` | implemented |
 | `fastcgi` (codec) | implemented |
-| `backend` (CGI mapping, classic pool) | implemented |
+| `backend::pool` (shared supervised pool) | implemented |
+| `backend::cgi`, `backend::classic` (classic mode) | implemented |
+| `backend::protocol`, `backend::persistent` (persistent mode) | implemented, experimental |
 | `static_files` | implemented |
-| supervisor (queue, crash replacement, shutdown) | implemented, in `backend::classic` |
+| supervisor (queue, crash replacement, recycling, shutdown) | implemented, in `backend::pool` |
 | observability (`logging`, `metrics`, `request_id`; admin listener in `server`) | implemented |
-| `protocol` (persistent worker) | phase 5 |

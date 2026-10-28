@@ -18,11 +18,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 
 pub use crate::body::ResponseBody;
 use crate::{
-    backend::{
-        Php,
-        cgi::ConnInfo,
-        classic::{ClassicPool, PoolStats},
-    },
+    backend::{Php, PhpPool, cgi::ConnInfo, pool::PoolStats},
     body,
     metrics::{self, Handler, Metrics},
     request_id, static_files,
@@ -65,7 +61,7 @@ impl App {
         }
     }
 
-    fn pool(&self) -> Option<&ClassicPool> {
+    fn pool(&self) -> Option<&PhpPool> {
         self.php.as_ref().map(|php| &php.pool)
     }
 }
@@ -74,7 +70,7 @@ impl App {
 /// application's address so they need not be exposed with it.
 pub struct Admin {
     pub metrics: Arc<Metrics>,
-    pub pool: Option<ClassicPool>,
+    pub pool: Option<PhpPool>,
 }
 
 /// Server behaviour that does not depend on PHP.
@@ -281,9 +277,9 @@ fn builtin(
     path: &str,
     method: &Method,
     metrics: &Metrics,
-    pool: Option<&ClassicPool>,
+    pool: Option<&PhpPool>,
 ) -> Option<Response<ResponseBody>> {
-    let stats = || pool.map(ClassicPool::stats);
+    let stats = || pool.map(PhpPool::stats);
     match path {
         "/health" => Some(only_get(method).unwrap_or_else(|| health(stats()))),
         "/metrics" => Some(only_get(method).unwrap_or_else(|| {

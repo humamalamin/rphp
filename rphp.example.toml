@@ -24,7 +24,9 @@ header_read_timeout_ms = 30000
 binary = "php-cgi"
 
 [worker]
-# "classic" only for now. "persistent" is rejected until roadmap phase 5.
+# "classic" (php-cgi over FastCGI) or "persistent" (experimental: PHP CLI
+# workers that boot the app once; see docs/persistent-mode.md). Persistent
+# mode also needs `script = "worker.php"` and `[php] binary = "php"`.
 mode = "classic"
 count = 4
 # Requests a PHP process serves before it is recycled
@@ -35,6 +37,10 @@ max_requests = 1000
 request_timeout_ms = 30000
 # Requests allowed to wait for a free worker; beyond that, 503 + Retry-After.
 max_queue_size = 256
+# Optional, off by default:
+# max_age_secs = 3600     # recycle workers after this long (both modes)
+# max_memory_mb = 128     # persistent mode: recycle above this memory_get_usage()
+# script = "worker.php"   # persistent mode: the rphp/worker script
 
 [admin]
 # Separate listener for /health and /metrics. When disabled, both are served

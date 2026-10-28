@@ -1,0 +1,28 @@
+{
+    "name": "rphp/worker",
+    "description": "PHP side of RPHP's experimental persistent mode: a worker loop that serves many requests from one booted application.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.4",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "nyholm/psr7": "^1.8",
+        "psr/http-factory": "^1.1",
+        "psr/http-message": "^2.0"
+    },
+    "suggest": {
+        "ext-pcntl": "Finish the current request before exiting on SIGTERM",
+        "psr/http-message": "Required by Rphp\\Worker\\Psr7\\Psr7Worker",
+        "psr/http-factory": "Required by Rphp\\Worker\\Psr7\\Psr7Worker"
+    },
+    "autoload": {
+        "psr-4": {
+            "Rphp\\Worker\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

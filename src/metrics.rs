@@ -12,7 +12,7 @@ use std::{
 
 use hyper::StatusCode;
 
-use crate::backend::classic::PoolStats;
+use crate::backend::pool::PoolStats;
 
 /// `Content-Type` of [`Metrics::render`]'s output.
 pub const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -60,10 +60,14 @@ pub enum Failure {
     PhpTimeout,
     /// PHP crashed or sent an invalid response (502).
     PhpFailed,
+    /// The application threw before responding (500, persistent mode).
+    PhpException,
+    /// Request headers too large to hand to a persistent worker (431).
+    HeadersTooLarge,
 }
 
 impl Failure {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::BodyTooLarge,
         Self::MalformedBody,
         Self::BodyTimeout,
@@ -71,6 +75,8 @@ impl Failure {
         Self::ShuttingDown,
         Self::PhpTimeout,
         Self::PhpFailed,
+        Self::PhpException,
+        Self::HeadersTooLarge,
     ];
 
     /// `http`: the client's request; `server`: RPHP's capacity or state;
@@ -84,6 +90,8 @@ impl Failure {
             Self::ShuttingDown => ("server", "shutting_down"),
             Self::PhpTimeout => ("php", "timeout"),
             Self::PhpFailed => ("php", "failed"),
+            Self::PhpException => ("php", "exception"),
+            Self::HeadersTooLarge => ("http", "headers_too_large"),
         }
     }
 }
@@ -322,7 +330,8 @@ fn render_pool(o: &mut String, pool: PoolStats) {
         o,
         "rphp_php_worker_restarts_total",
         "counter",
-        "PHP workers replaced, by reason (recycled: reached max_requests; \
+        "PHP workers replaced, by reason (recycled: reached max_requests, \
+         max_age_secs or max_memory_mb; \
          failed: error, timeout or crash).",
     );
     sample(

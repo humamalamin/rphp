@@ -78,6 +78,14 @@ pub struct WorkerConfig {
     pub request_timeout_ms: u64,
     /// Requests allowed to wait for a free worker before new ones get 503.
     pub max_queue_size: usize,
+    /// Recycle a worker after it has run this long (both modes).
+    pub max_age_secs: Option<u64>,
+    /// Persistent mode only: recycle a worker whose `memory_get_usage()`
+    /// reaches this many MiB after a request.
+    pub max_memory_mb: Option<u64>,
+    /// Persistent mode only: the worker script (an `rphp/worker` loop),
+    /// relative to the config file's directory.
+    pub script: Option<PathBuf>,
 }
 
 /// Separate listener for `/health` and `/metrics`.
@@ -131,6 +139,9 @@ impl Default for WorkerConfig {
             max_requests: 1000,
             request_timeout_ms: 30_000,
             max_queue_size: 256,
+            max_age_secs: None,
+            max_memory_mb: None,
+            script: None,
         }
     }
 }
@@ -143,6 +154,8 @@ pub struct ValidatedConfig {
     pub admin_listen: Option<SocketAddr>,
     pub document_root: PathBuf,
     pub entry_point: PathBuf,
+    /// Canonical worker script, in persistent mode.
+    pub worker_script: Option<PathBuf>,
     /// Directory relative paths (including `php.binary`) are resolved against.
     pub base_dir: PathBuf,
     pub raw: Config,
@@ -163,6 +176,17 @@ impl ValidatedConfig {
 
     pub fn request_timeout(&self) -> Duration {
         Duration::from_millis(self.raw.worker.request_timeout_ms)
+    }
+
+    pub fn max_age(&self) -> Option<Duration> {
+        self.raw.worker.max_age_secs.map(Duration::from_secs)
+    }
+
+    pub fn max_memory_bytes(&self) -> Option<u64> {
+        self.raw
+            .worker
+            .max_memory_mb
+            .map(|mb| mb.saturating_mul(1024 * 1024))
     }
 }
 
@@ -242,12 +266,36 @@ impl Config {
             errors.push("php.binary must not be empty".into());
         }
 
-        if w.mode == WorkerMode::Persistent {
+        let worker_script = match (w.mode, &w.script) {
+            (WorkerMode::Persistent, Some(script)) => {
+                check_worker_script(script, base_dir, &mut errors)
+            }
+            (WorkerMode::Persistent, None) => {
+                errors.push(
+                    "worker.mode = \"persistent\" needs worker.script, the PHP file that runs \
+                     the rphp/worker loop"
+                        .into(),
+                );
+                None
+            }
+            (WorkerMode::Classic, Some(_)) => {
+                errors.push("worker.script only applies to worker.mode = \"persistent\"".into());
+                None
+            }
+            (WorkerMode::Classic, None) => None,
+        };
+        if w.mode == WorkerMode::Classic && w.max_memory_mb.is_some() {
             errors.push(
-                "worker.mode = \"persistent\" is not implemented yet (roadmap phase 5); \
-                 use \"classic\""
+                "worker.max_memory_mb only applies to persistent mode; in classic mode use \
+                 PHP's memory_limit"
                     .into(),
             );
+        }
+        if w.max_memory_mb == Some(0) {
+            errors.push("worker.max_memory_mb must be greater than 0".into());
+        }
+        if w.max_age_secs == Some(0) {
+            errors.push("worker.max_age_secs must be greater than 0".into());
         }
         if w.count == 0 || w.count > MAX_WORKER_COUNT {
             errors.push(format!(
@@ -271,6 +319,7 @@ impl Config {
                 admin_listen: admin_ip.map(|ip| SocketAddr::new(ip, a.port)),
                 document_root,
                 entry_point,
+                worker_script,
                 base_dir: base_dir.to_path_buf(),
                 raw: self.clone(),
             }),
@@ -297,6 +346,41 @@ fn check_document_root(root: &Path, base_dir: &Path, errors: &mut Vec<String>) -
         Err(err) => {
             errors.push(format!(
                 "server.document_root {} cannot be opened: {err}",
+                full.display()
+            ));
+            None
+        }
+    }
+}
+
+/// The persistent worker script: an existing `.php` file, relative paths
+/// resolved against the config file's directory.
+fn check_worker_script(
+    script: &Path,
+    base_dir: &Path,
+    errors: &mut Vec<String>,
+) -> Option<PathBuf> {
+    let full = if script.is_absolute() {
+        script.to_path_buf()
+    } else {
+        base_dir.join(script)
+    };
+    if full.extension().and_then(|e| e.to_str()) != Some("php") {
+        errors.push(format!(
+            "worker.script {} must be a .php file",
+            script.display()
+        ));
+        return None;
+    }
+    match full.canonicalize() {
+        Ok(path) if path.is_file() => Some(path),
+        Ok(path) => {
+            errors.push(format!("worker.script {} is not a file", path.display()));
+            None
+        }
+        Err(err) => {
+            errors.push(format!(
+                "worker.script {} cannot be opened: {err}",
                 full.display()
             ));
             None
@@ -413,11 +497,33 @@ mod tests {
     }
 
     #[test]
-    fn persistent_mode_is_rejected_for_now() {
+    fn persistent_mode_needs_an_existing_worker_script() {
         let app = TempApp::new("persistent");
         let mut cfg = Config::default();
         cfg.worker.mode = WorkerMode::Persistent;
-        assert!(problems(&cfg, &app.0)[0].contains("not implemented yet"));
+        assert!(problems(&cfg, &app.0)[0].contains("needs worker.script"));
+
+        cfg.worker.script = Some("missing.php".into());
+        assert!(problems(&cfg, &app.0)[0].contains("cannot be opened"));
+
+        fs::write(app.0.join("worker.php"), "<?php").unwrap();
+        cfg.worker.script = Some("worker.php".into());
+        cfg.worker.max_memory_mb = Some(128);
+        let v = cfg.validate(&app.0).unwrap();
+        assert!(v.worker_script.as_ref().unwrap().ends_with("worker.php"));
+        assert_eq!(v.max_memory_bytes(), Some(128 * 1024 * 1024));
+    }
+
+    #[test]
+    fn persistent_only_keys_are_rejected_in_classic_mode() {
+        let app = TempApp::new("classic-keys");
+        fs::write(app.0.join("worker.php"), "<?php").unwrap();
+        let mut cfg = Config::default();
+        cfg.worker.script = Some("worker.php".into());
+        cfg.worker.max_memory_mb = Some(64);
+        cfg.worker.max_age_secs = Some(0);
+        let errs = problems(&cfg, &app.0);
+        assert_eq!(errs.len(), 3, "{errs:#?}");
     }
 
     #[test]
