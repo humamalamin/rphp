@@ -1,0 +1,33 @@
+# RPHP configuration. Copy to `rphp.toml` and adjust.
+# Every key is optional; the values below are the built-in defaults.
+# Relative paths are resolved against the directory containing this file.
+# Unknown keys are rejected so that typos fail loudly.
+
+[server]
+# Loopback by default. Binding to 0.0.0.0 exposes the server to the network.
+host = "127.0.0.1"
+port = 8080
+document_root = "public"
+# Front controller, relative to document_root. Must stay inside it.
+entry_point = "index.php"
+# Largest request body accepted (8 MiB). Enforced once PHP execution lands.
+max_body_bytes = 8388608
+# How long shutdown waits for in-flight connections to finish.
+shutdown_timeout_ms = 10000
+# How long a client may take to send its request headers (slowloris guard).
+header_read_timeout_ms = 30000
+
+[php]
+# Name on PATH or a path to the interpreter. Classic mode uses the FastCGI
+# SAPI, so php-cgi is expected. PHP 8.4 is the fixed minimum version.
+binary = "php-cgi"
+
+[worker]
+# "classic" only for now. "persistent" is rejected until roadmap phase 5.
+mode = "classic"
+count = 4
+# Requests a PHP process serves before it is recycled
+# (php-cgi's PHP_FCGI_MAX_REQUESTS in classic mode).
+max_requests = 1000
+request_timeout_ms = 30000
+max_queue_size = 256

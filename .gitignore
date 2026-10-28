@@ -1,0 +1,5 @@
+/target
+/rphp.toml
+.env
+*.log
+.DS_Store

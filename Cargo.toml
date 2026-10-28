@@ -1,0 +1,21 @@
+[package]
+name = "rphp"
+version = "0.1.0"
+edition = "2024"
+# Edition 2024 requires Rust 1.85 or newer.
+rust-version = "1.85"
+description = "A Rust-powered PHP application server"
+license = "MIT"
+readme = "README.md"
+# Add `repository = "https://github.com/<owner>/rphp"` once the repository exists.
+
+[dependencies]
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1.4", features = ["http1", "server"] }
+hyper-util = { version = "0.1.10", features = ["tokio", "server", "server-graceful", "http1"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "process", "io-util"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
